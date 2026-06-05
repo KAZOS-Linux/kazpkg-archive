@@ -77,12 +77,6 @@ archive package.zip
 
 ---
 
-## Status
-
-Current Status: **Beta**
-
----
-
 ## Documentation
 
 - 🇺🇸 English → [README.en.md](README.en.md)
