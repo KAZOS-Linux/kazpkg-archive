@@ -1,0 +1,48 @@
+#!/bin/bash
+source .engine
+
+# Checking authorized inputs
+if (($# > 4 || $# < 2));then
+    print_color "Too much or too little input." $red
+    exit 1
+# To display the list
+elif [[ $2 == -l || $2 == -list ]];then 
+    zipinfo -1 $1 | tree --fromfile
+    exit 0
+fi
+
+# check archive
+if [ ! -f "$1" ];then
+    print_color "Error: archive $1 not found in this directory." $red
+    exit 1
+fi
+
+# Flag analysis
+case $2 in 
+    -d|-del)
+        if zip -d "$1" "$3"; then 
+            exit 0
+        else 
+            print_color "This operation failed." $red
+            exit 1
+        fi
+
+    ;;
+    -a|-add)
+        if analysis_flages "$3" "$4"; then
+            add_archive "$1"
+        fi
+    ;;
+    -u|-update)
+        if analysis_flages "$3" "$4"; then 
+            add_archive "$1"
+        fi
+    ;;
+    *)
+        print_color "Invalid flag: $2" $red
+        exit 1
+    ;; 
+esac
+
+
+

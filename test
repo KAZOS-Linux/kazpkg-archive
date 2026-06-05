@@ -1,0 +1,15 @@
+#!/bin/bash
+source .engine
+
+clean
+
+set:sources_list "deb https://deb.debian.org/debian/ trixie main"
+pkg:mirror hello
+pkg:mirror featherpad
+pkg:mirror vim
+pkg:mirror nano
+
+basefile:pointer_file_url https://kazos-linux.github.io/base-file/last_version
+
+create_archive
+

@@ -1,0 +1,234 @@
+#engine v0.2b
+#!/bin/bash
+
+
+# Tools ------------------------------------------------
+
+
+# If the folder does not exist, it will be created.
+check_folder ()
+{
+    [[ -d ./$1 ]] && return
+    mkdir -p "$1"
+} 
+
+
+# Creating folders alphabetically
+first_char=""
+check_archive_folder ()
+{
+    first_char=$(grep -o '^.' <<< "$1" | tr '[:upper:]' '[:lower:]')
+    check_folder .tmp_archive/$first_char
+}
+
+# If the mirror is not configured in this session, the user will be asked a question.
+tui:set_sources_list ()
+{
+    read -p "sources.list: " sources_list
+    echo $sources_list
+    set:sources_list "$sources_list"
+}
+
+# Colored varnish for error/success alert statuses
+red=31
+green=32
+yellow=33
+blue=34
+purple=35
+print_color ()
+{
+    printf "\033[1;$2"
+    printf "m$1\033[0m\n"
+}
+
+clean ()
+{
+    rm -rf -- .tmp_archive
+}
+
+
+# API ----------------------------------------------------------
+
+# Download to the latest version via a pointer
+basefile:pointer_file_url ()
+{  
+    if curl -L "$1" > .last_version ; then
+        print_color "Download successful: $1" $blue
+    else
+        print_color "Error: Download failed for $1" $red
+        return 1
+    fi
+    
+    last_version=$(cat .last_version)
+
+    if [[ $last_version ]]; then
+        pkg:url "$last_version"
+        rm -f .last_version
+        return 0
+    else
+        print_color "last_version invalid." $red
+        rm -f .last_version
+        return 1
+    fi
+}
+
+# Receive a basefile via a local address
+basefile:debfile ()
+{
+    pkg:debfile "$1"
+}
+
+
+# Setting up a mirror to receive packages
+sources_list=0
+
+set:sources_list ()
+{
+    check_folder .tmp_apt/lists
+
+    echo "$1" > .tmp_apt/sources.list
+
+    sudo apt update -o Dir::Etc::SourceList="$(pwd)/.tmp_apt/sources.list" \
+                    -o Dir::State::Lists="$(pwd)/.tmp_apt/lists"
+
+    sources_list=1
+
+}
+
+
+# Setting up a mirror to receive packages
+pkg:mirror ()
+{   
+    
+    if [[ -f .tmp_apt/sources.list ]] && (( ! sources_list ));then
+        read -p "set new sources_list? (y/n)?" 
+        [[ $REPLY == [yY] ]] && tui:set_sources_list    
+    elif [[ ! -f .tmp_apt/sources.list ]];then  
+        tui:set_sources_list
+    fi
+    
+    sources_list=1
+
+    check_archive_folder "$1"
+    cd ".tmp_archive/$first_char" || return 1
+
+    if  apt download "$1" -o Dir::Etc::SourceList="../../.tmp_apt/sources.list" \
+                                    -o Dir::State::Lists="../../.tmp_apt/lists" \
+                                    &> /dev/null ;then
+        print_color "Downloading $1 from Mirror was successful." $purple
+        cd ../../ || return 1
+        return 0
+    else
+
+        print_color "Error: Download from mirror failed for $1" $red
+        cd ../../ || return 1
+        return 1
+    fi
+
+}
+
+
+# Receive a package via an internet address
+pkg:url ()
+{   
+
+    filename="${1##*/}"
+    check_archive_folder "$filename"
+
+    if curl -f --output-dir ".tmp_archive/$first_char" -O "$1"; then
+
+        print_color "Download successful: $1" $green
+        return 0
+    else
+        print_color "Error: Download failed for $1" $red
+        return 1
+    fi
+
+}
+
+# Receive a package via a local address
+pkg:debfile ()
+{   
+    if [[ ! -f $1 ]]; then 
+        print_color "Error: file $1 no found!" $red
+        return 1
+    fi
+
+    check_archive_folder ${1##*/}
+    cp "$1" ".tmp_archive/$first_char" || return 1
+}
+
+
+
+# Archiveing ---------------------------------------------------
+
+
+# Creating an archive
+create_archive ()
+{
+    cd .tmp_archive || return 1
+    
+    if zip -r package.zip . &> /dev/null;then
+        print_color "Compression completed successfully" $green
+    else 
+        print_color "Compression failed" $red
+        return 1
+    fi
+    
+    mv package.zip .. && cd .. || return 1
+    clean
+}
+
+# Package flags analyzer in archive-crtl
+analysis_flages ()
+{
+
+    clean
+
+    case $1 in 
+        basefile:debfile)
+            if ! basefile:debfile "$2"; then 
+                print_color "Failure in: $1 $2" $red
+                return 1
+            fi
+        ;;
+        basefile:pointer_file_url)
+            if ! basefile:pointer_file_url "$2"; then
+                print_color "Failure in: $1 $2" $red
+                return 1
+            fi
+        ;;
+        pkg:debfile)
+            if ! pkg:debfile "$2"; then
+                print_color "Failure in: $1 $2" $red
+                return 1
+            fi
+        ;;
+        pkg:url)
+            if ! pkg:url "$2"; then 
+                print_color "Failure in: $1 $2" $red
+                return 1
+            fi
+        ;;
+        pkg:mirror)
+            echo "oooo: $2"
+            if ! pkg:mirror "$2"; then
+                print_color "Failure in: $1 $2" $red
+                return 1
+            fi
+        ;; 
+        *)
+            print_color "Invalid command." $red 
+            return 1
+        ;;
+    esac
+}
+
+# Adding or updating a package in the archive
+add_archive () 
+{
+    cd .tmp_archive || return 1
+    zip "../$1" */*.deb
+    cd .. || return 1
+    clean && return 0
+}
