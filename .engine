@@ -211,7 +211,6 @@ analysis_flages ()
             fi
         ;;
         pkg:mirror)
-            echo "oooo: $2"
             if ! pkg:mirror "$2"; then
                 print_color "Failure in: $1 $2" $red
                 return 1
