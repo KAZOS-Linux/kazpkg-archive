@@ -92,4 +92,4 @@ Current Status: **Beta**
 
 ## License
 
-GPLv3
+GPLv2
