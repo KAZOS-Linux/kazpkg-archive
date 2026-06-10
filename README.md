@@ -95,8 +95,3 @@ archive package.zip
  </picture>
 </a>
 
----
-
-## License
-
-GPLv2
