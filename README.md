@@ -1,7 +1,6 @@
 # kazpkg-archive
 
-
-
+<img width="1536" height="1024" alt="file_0000000089a4720c8ca2e37b8fc73a9a" src="https://github.com/user-attachments/assets/5350bdeb-f668-4e36-ae12-46f56d25f619" />
 
 Portable Debian Package Archive Manager
 
