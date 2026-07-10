@@ -1,45 +1,90 @@
 #!/bin/bash
 source .engine
+source .lib-tools
 
 # Checking authorized inputs
 if (($# > 4 || $# < 2));then
-    print_color "Too much or too little input." $red
+    color:print "Too much or too little input." ${red}
     exit 1
 # To display the list
-elif [[ $2 == -l || $2 == -list ]];then 
-    zipinfo -1 $1 | tree --fromfile
+elif [[ "${2}" == -l || "${2}" == -list ]];then 
+    zipinfo -1 "${1}" | tree --fromfile
     exit 0
 fi
 
 # check archive
-if [ ! -f "$1" ];then
-    print_color "Error: archive $1 not found in this directory." $red
+if [ ! -f "${1}" ];then
+    color:print "Error: archive $1 not found in this directory." ${red}
     exit 1
 fi
 
 # Flag analysis
-case $2 in 
+
+archive="${1}"
+
+case "${2}" in 
     -d|-del)
-        if zip -d "$1" "$3"; then 
+        pkg=${3}
+
+        meta_data:archive:open "${1}" || exit 1
+
+        if ! archive:pkg:del "${archive}" "${pkg}"; then 
+            color:print "This operation failed." ${red}
+            meta_data:archive:close
+            exit 1
+        fi
+
+        meta_data:archive:close
+        exit 0
+
+    ;;
+    -dd|-deldeps)
+        pkg="$(echo "${3}" | rev | cut -d'/' -f1 | rev)"
+        deps=""
+
+        meta_data:archive:open "${archive}" || exit 1
+        
+
+        for dep in $(meta_data:found:depends "${pkg}") ; do
+            if [[ "$(meta_data:found:name "${pkg}")" == "$(meta_data:search:depends ${dep})" ]]; then 
+                dep=$(meta_data:found:namefull "${dep}")
+                deps="${deps} ${dep}"
+            fi
+        done
+        
+        echo "${deps}"
+        exit 0
+
+        if ! archive:pkg:del "${archive}" "${pkg} ${deps}"; then 
+            color:print "This operation failed." ${red}
+            meta_data:archive:close
+            exit 1
+        fi
+
+        meta_data:archive:close
+        exit 0
+
+    ;;
+    -a|-add|-u|-update)
+        command="${3}"
+        pkg="${4}"
+
+
+        meta_data:archive:open ${archive} || exit 1
+
+        if analysis:flages:add "${command}" "${pkg}"; then
+            archive:pkg:add "${archive}" || exit 1
+            meta_data:archive:close
             exit 0
         else 
-            print_color "This operation failed." $red
+            color:print "This operation failed." ${red}
+            meta_data:archive:close
             exit 1
         fi
 
     ;;
-    -a|-add)
-        if analysis_flages "$3" "$4"; then
-            add_archive "$1"
-        fi
-    ;;
-    -u|-update)
-        if analysis_flages "$3" "$4"; then 
-            add_archive "$1"
-        fi
-    ;;
     *)
-        print_color "Invalid flag: $2" $red
+        color:print "Invalid flag: ${2}" ${red}
         exit 1
     ;; 
 esac

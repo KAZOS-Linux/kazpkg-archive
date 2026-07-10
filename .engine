@@ -1,97 +1,447 @@
-#engine v0.2b
+#engine v0.4b
 #!/bin/bash
+[[ -n "${__ENGINE_LOADED__}" ]] && return 0
+readonly __ENGINE_LOADED__="YES"
+
+source .lib-tools
+ 
+CURL_FLAG=""
 
 
-# Tools ------------------------------------------------
+# DataBase ----------------------------------------------------------
 
+# Probe the host architecture and set the path to the SQLite binary.
+ARCH=""
+PATH_SQLITE=""
 
-# If the folder does not exist, it will be created.
-check_folder ()
+db:arch ()
 {
-    [[ -d ./$1 ]] && return
-    mkdir -p "$1"
-} 
 
+    [[ -z ARCH ]] && return 0
 
-# Creating folders alphabetically
-first_char=""
-check_archive_folder ()
-{
-    first_char=$(grep -o '^.' <<< "$1" | tr '[:upper:]' '[:lower:]')
-    check_folder .tmp_archive/$first_char
+    case "$(uname -m)" in
+        x86_64)
+            ARCH=x86_64
+            ;;
+        i?86)
+            ARCH=i686
+            ;;
+        armv7l)
+            ARCH=armv7
+            ;;
+        aarch64|arm64)
+            ARCH=aarch64
+            ;;
+        *)
+            log:failure "db:arch" "$(uname -m) architecture is not supported."
+            exit 1
+            ;;
+    esac
+
+    PATH_SQLITE="bin/${ARCH}/sqlite3"
+
 }
 
-# If the mirror is not configured in this session, the user will be asked a question.
-tui:set_sources_list ()
+# scan cached deb; index metadata into sqlite db.
+db:scan ()
 {
-    read -p "sources.list: " sources_list
-    echo $sources_list
-    set:sources_list "$sources_list"
-}
 
-# Colored varnish for error/success alert statuses
-red=31
-green=32
-yellow=33
-blue=34
-purple=35
-print_color ()
-{
-    printf "\033[1;$2"
-    printf "m$1\033[0m\n"
-}
+    db:arch || return 1
 
-clean ()
-{
-    rm -rf -- .tmp_archive
-}
+    PACKAGE_FILE="${path_mirror_default}/Packages"
+    DB_FILE="${path_mirror_default}/Packages.db"
 
+    rm -f "$DB_FILE"
 
-# API ----------------------------------------------------------
+    ${PATH_SQLITE} "$DB_FILE" "CREATE TABLE IF NOT EXISTS pkgs (name TEXT PRIMARY KEY, depends TEXT, provides TEXT, filename TEXT);"
 
-# Download to the latest version via a pointer
-basefile:pointer_file_url ()
-{  
-    if curl -L "$1" > .last_version ; then
-        print_color "Download successful: $1" $blue
-    else
-        print_color "Error: Download failed for $1" $red
-        return 1
-    fi
+    awk '
+    BEGIN { 
+        RS = ""; FS = "\n"; 
+    }
+    {
+        pkg=""; dep=""; prov=""; fname=""
+        for(i=1; i<=NF; i++) {
+            if ($i ~ /^Package: /) {
+                pkg = $i; sub(/^Package: /, "", pkg)
+            }
+            else if ($i ~ /^Depends: / || $i ~ /^Pre-Depends: /) {
+                line = $i
+                sub(/^Pre-Depends: /, "", line)
+                sub(/^Depends: /, "", line)
+                gsub(/\([^)]*\)/, "", line)
+                gsub(/:[a-zA-Z0-9_-]+/, "", line)
+                gsub(/[|,]/, " ", line)
+                gsub(/ +/, " ", line)
+                sub(/^ /, "", line); sub(/ $/, "", line)
+                dep = line
+            }
+            else if ($i ~ /^Provides: /) {
+                prov = $i; sub(/^Provides: /, "", prov)
+                gsub(/:[a-zA-Z0-9_-]+/, "", prov)
+                gsub(/[|,]/, " ", prov)
+                gsub(/ +/, " ", prov)
+                sub(/^ /, "", prov); sub(/ $/, "", prov)
+            }
+            else if ($i ~ /^Filename: /) {
+                fname = $i; sub(/^Filename: /, "", fname)
+            }
+        }
     
-    last_version=$(cat .last_version)
+        if (pkg != "") {
+            pkgs[pkg] = dep
+            provs[pkg] = prov
+            fnames[pkg] = fname
+        
+            n = split(prov, arr, " ")
+            for(j=1; j<=n; j++) {
+                if (!(arr[j] in vmap)) {
+                    vmap[arr[j]] = pkg
+                }
+            }
+        }
+    }
+    END {
+        print "BEGIN TRANSACTION;"
+        for (pkg in pkgs) {
+            dep = pkgs[pkg]
+            prov = provs[pkg]
+            fname = fnames[pkg]
+        
+            n = split(dep, arr, " ")
+            new_dep = ""
+            for(j=1; j<=n; j++) {
+                item = arr[j]
+                if ((!(item in pkgs)) && (item in vmap)) {
+                    item = vmap[item]
+                }
+                new_dep = (new_dep == "" ? item : new_dep " " item)
+            }
+        
+            gsub(/\x27/, "\x27\x27", pkg)
+            gsub(/\x27/, "\x27\x27", new_dep)
+            gsub(/\x27/, "\x27\x27", prov)
+            gsub(/\x27/, "\x27\x27", fname)
+        
+            printf "INSERT OR REPLACE INTO pkgs VALUES (\x27%s\x27, \x27%s\x27, \x27%s\x27, \x27%s\x27);\n", pkg, new_dep, prov, fname
+        }
+        print "COMMIT;"
+    }' "${PACKAGE_FILE}" | ${PATH_SQLITE} "$DB_FILE"
 
-    if [[ $last_version ]]; then
-        pkg:url "$last_version"
-        rm -f .last_version
-        return 0
-    else
-        print_color "last_version invalid." $red
-        rm -f .last_version
+
+}
+
+# db lookup: pkg name -> url.
+db:get:url ()
+{
+    db:arch || return 1
+    echo "$(cat .mirror_source/${default_mirror}/url)/$(${PATH_SQLITE} -list ${path_mirror_default}/Packages.db "SELECT filename FROM pkgs WHERE name='${1}';")"
+}
+
+# db lookup: pkg name -> deps list.
+db:found:depends ()
+{
+    db:arch || return 1
+    ${PATH_SQLITE} -list ${path_mirror_default}/Packages.db "SELECT depends FROM pkgs WHERE name='${1}';"
+}
+
+# recursively resolve transitive deps to leaf (zero deps); return full closure
+db:found:all:depends ()
+{
+    local main_depends="$(db:found:depends ${1} 2> /dev/null)"
+    local deps_found=""
+    local ret_deps_found=""
+
+    for dep in ${main_depends}; do 
+
+        deps_found="${dep}"
+
+        while [[ "${deps_found}" ]]; do
+            deps_found="$(db:found:depends "${deps_found}" 2> /dev/null)"
+            
+            for d in ${deps_found}; do
+                if ! meta_data:found:name "${d}" &> /dev/null; then
+                    ret_deps_found="${ret_deps_found} ${d}"
+                fi
+            done
+        done 
+
+    done
+
+    echo "${main_depends} ${ret_deps_found}" | tr ' ' '\n' | sort -u | xargs
+}
+
+# MetaData ----------------------------------------------------------
+
+path_meta_data=".tmp_archive/meta_data.db"
+
+# verify metadata existence; create if missing, else no-op.
+meta_data:check ()
+{
+    [[ -f ${path_meta_data} ]] && return 0
+
+    db:arch || return 1
+    mkdir -p .tmp_archive/
+    ${PATH_SQLITE} ${path_meta_data} "CREATE TABLE IF NOT EXISTS pkgs (name TEXT PRIMARY KEY, fullname TEXT, depends TEXT);"
+    ${PATH_SQLITE} ${path_meta_data} "CREATE TABLE IF NOT EXISTS rootdir (name TEXT);"
+
+}
+
+# set rootdir to archive root in metadata.
+meta_data:set:rootdir ()
+{
+    meta_data:check
+    db:arch || return 1
+    ${PATH_SQLITE} ${path_meta_data} "DELETE FROM rootdir; INSERT INTO rootdir (name) VALUES ('${1}');"    
+}
+
+# add package to metadata.
+meta_data:pkg:add ()
+{
+    meta_data:check
+    db:arch || return 1
+    ${PATH_SQLITE} ${path_meta_data} "INSERT OR REPLACE INTO pkgs (name, fullname, depends) VALUES ('${1}', '${2}', '${3}');"
+
+}
+
+# add dependencies to a package in metadata.
+meta_data:pkg:add:depends ()
+{
+    meta_data:check
+    db:arch || return 1
+    ${PATH_SQLITE} "${path_meta_data}" "UPDATE pkgs SET depends = TRIM(IFNULL(depends, '') || ' ${2}') WHERE name='${1}' OR fullname='${1}';"    
+}
+
+# remove package from metadata.
+meta_data:pkg:del ()
+{
+    meta_data:found:self "meta_data:del" || return 1
+    db:arch || return 1
+    ${PATH_SQLITE} ${path_meta_data} "DELETE FROM pkgs WHERE name='${1}' OR fullname='${1}';"
+}
+
+# check metadata existence.
+meta_data:found:self ()
+{
+    if [[ ! -f ${path_meta_data} ]]; then
+        log:failure "${1}" "not found ${path_meta_data}"
+        return 1
+    fi 
+}
+
+# get rootdir value.
+meta_data:found:rootdir ()
+{
+    meta_data:found:self "meta_data:found:rootdir" || return 1
+    db:arch || return 1
+
+    local name_rootdir=$(${PATH_SQLITE} -list ${path_meta_data} "SELECT name FROM rootdir;")
+    [[ ! ${name_rootdir} ]] && return 1
+    echo ${name_rootdir}
+}
+
+# find name package by name or full name.
+meta_data:found:name ()
+{
+    meta_data:found:self "meta_data:found:name" || return 1
+    db:arch || return 1
+    
+    local name_pkg=$(${PATH_SQLITE} -noheader -list ${path_meta_data} "SELECT name FROM pkgs WHERE name='${1}' OR fullname='${1}';" | xargs)
+    [[ ! ${name_pkg} ]] && return 1
+    echo ${name_pkg}
+}
+
+# find fullname package by name or full name.
+meta_data:found:namefull ()
+{
+    meta_data:found:self "meta_data:found:namefull" || return 1
+    db:arch || return 1
+
+    local namefull_pkg=$(${PATH_SQLITE} -list ${path_meta_data} "SELECT fullname FROM pkgs WHERE name='${1}' OR fullname='${1}';")
+    [[ ! ${namefull_pkg} ]] && return 1
+    echo ${namefull_pkg}
+}
+
+# return dependencies for given name or full name.
+meta_data:found:depends ()
+{
+    meta_data:found:self "meta_data:found:depends" || return 1
+    db:arch || return 1
+    
+    local deps=$(${PATH_SQLITE} -list ${path_meta_data} "SELECT depends FROM pkgs WHERE name='${1}' OR fullname='${1}';")
+    [[ ! ${deps} ]] && return 1
+    echo ${deps}
+}
+
+# find all packages that depend on the given package.
+meta_data:search:depends ()
+{
+    meta_data:found:self "meta_data:found:depends" || return 1
+    db:arch || return 1
+
+    local found=$(${PATH_SQLITE} -noheader -list ${path_meta_data} "SELECT name FROM pkgs WHERE ' ' || depends || ' ' LIKE '% ${1} %';" | xargs)
+    [[ ! ${found} ]] && return 1
+    echo ${found}
+}
+
+# extract archive metadata; assign path_meta_data relative to temp.
+meta_data:archive:open ()
+{
+
+    if [[ -z "${1}" ]]; then 
+        log:failure "meta_data:archive:open" "please first set archive"
+        return 1
+    elif [[ ! -f "${1}" ]]; then
+        log:failure "meta_data:archive:open" "not found ${1} in directory"
         return 1
     fi
+
+
+    if unzip -p ${1} '*/meta_data.db' > .meta_data.db; then 
+        path_meta_data=./.meta_data.db
+    else 
+        log:failure "meta_data:archive:open" "not can open ${1}"
+    fi 
+
 }
 
-# Receive a basefile via a local address
-basefile:debfile ()
+# remove extracted archive from temp path.
+meta_data:archive:close ()
 {
-    pkg:debfile "$1"
+    rm -f ./.meta_data.db
 }
 
+# update archive from modified extracted contents.
+meta_data:archive:update ()
+{   
+    if [[ -z "${1}" ]]; then 
+        log:failure "meta_data:archive:open" "please first set archive"
+        return 1
+    elif [[ ! -f "${1}" ]]; then
+        log:failure "meta_data:archive:open" "not found ${1} in directory"
+        return 1
+    fi
+
+    local rootdir=$(meta_data:found:rootdir)
+    local path=".tmp_archive/${rootdir}"
+    local metadata="meta_data.db"
+
+    mkdir -p "${path}"
+
+    cp .meta_data.db "${path}/${metadata}" 
+
+    cd .tmp_archive/ || return 1
+
+    zip -u ../"${1}"  "${rootdir}/${metadata}"
+
+    cd ../ || return 1
+
+    clean
+}
+
+# APIs ----------------------------------------------------------
+
+path_mirror_default=""
+
+check:mirror:default ()
+{
+    path_mirror_default=".mirror_source/${default_mirror}/${default_dists}/${default_components}/${default_arch}"
+
+    if [[ ! -f  "${path_mirror_default}/Packages" ]] && (( ! ret_mirror_default )); then
+        color:start ${blue}
+        read -p "No mirrors configured. Do you want to define a mirror manually now (y/n)?" input 
+        color:end
+        
+        [[ ${input} =~ ^([yY]|[yY][eE][sS])$ ]] && tui:mirror:source    
+    fi
+}
 
 # Setting up a mirror to receive packages
-sources_list=0
+ret_mirror_source=0
 
-set:sources_list ()
+mirror:source ()
 {
-    check_folder .tmp_apt/lists
+    mkdir -p ".mirror_source/${2}"
 
-    echo "$1" > .tmp_apt/sources.list
+    echo "${1}" > .mirror_source/${2}/url
 
-    sudo apt update -o Dir::Etc::SourceList="$(pwd)/.tmp_apt/sources.list" \
-                    -o Dir::State::Lists="$(pwd)/.tmp_apt/lists"
+    ret_mirror_source=1
 
-    sources_list=1
+}
+
+
+# set default mirror values; required for mirror:update and pkg:mirror and ...
+default_mirror=""
+default_dists=""
+default_components=""
+default_arch=""
+ret_mirror_default=0
+path_mirror_default=""
+
+mirror:default ()
+{
+
+    if [[ ! -d ".mirror_source/$1" ]]; then 
+        log:failure "mirror:default:" "[ mirror:source url ${1} ] <- not found!"
+        return 1
+    elif (( ret_mirror_source == 0 )); then
+        log:waring "mirror:default:" "It seems like this ${1} mirror already exists, but it has not been defined in this session."
+    fi  
+
+    default_mirror="${1}"
+    default_dists="${2}"
+    default_components="${3}"
+    default_arch="${4}"
+
+    path_mirror_default="$(pwd)/.mirror_source/${default_mirror}/${default_dists}/${default_components}/${default_arch}"
+
+    ret_mirror_default=1
+}
+
+# fetch packages from repo; analyze; no-op if unchanged.
+mirror:update ()
+{    
+
+    check:mirror:default
+    if (( ! ret_mirror_default )); then
+        log:failure "mirror:update:" "Plase first set mirror:default!" 
+        return 1
+    fi
+
+    [[ -f .mirror_source/${default_mirror}/url ]] && url=$(cat .mirror_source/${default_mirror}/url)/dists/${default_dists}/${default_components}/binary-${default_arch}
+
+
+    if ! curl -f ${CURL_FLAG} "${url}/Release" &> /dev/null; then
+        log:failure "mirror:update:" "Mirror ${default_mirror} not available."
+        return 1;
+    fi  
+    
+
+    if [[ -f "${path_mirror_default}/Packages.db" ]] && [[ -f "${path_mirror_default}/sha256" ]]; then 
+
+        if curl -fI ${CURL_FLAG} "${url}/by-hash/SHA256/$(cat ${path_mirror_default}/sha256)" &> /dev/null; then 
+            log:success "mirror:update:" "The ${default_mirror} mirror has been updated" 
+            return 0
+        else 
+            log:failure "mirror:update:" "The update failed. Please check this address: ${url}/by-hash/SHA256/$(cat ${path_mirror_default}/sha256)" 
+            return 1
+        fi  
+    fi
+
+    check:folder ${path_mirror_default}
+    curl ${CURL_FLAG} -o ${path_mirror_default}/Packages.gz ${url}/Packages.gz
+
+    sha256sum ${path_mirror_default}/Packages.gz | cut -d' ' -f1 > ${path_mirror_default}/sha256
+
+    gzip -dc ${path_mirror_default}/Packages.gz > ${path_mirror_default}/Packages
+    rm ${path_mirror_default}/Packages.gz
+
+
+    db:scan
+    rm -f ${path_mirror_default}/Packages
+
+
+    log:success "mirror:update:" "The ${default_mirror} mirror has been updated"
 
 }
 
@@ -99,48 +449,59 @@ set:sources_list ()
 # Setting up a mirror to receive packages
 pkg:mirror ()
 {   
-    
-    if [[ -f .tmp_apt/sources.list ]] && (( ! sources_list ));then
-        read -p "set new sources_list? (y/n)?" 
-        [[ $REPLY == [yY] ]] && tui:set_sources_list    
-    elif [[ ! -f .tmp_apt/sources.list ]];then  
-        tui:set_sources_list
-    fi
-    
-    sources_list=1
 
-    check_archive_folder "$1"
-    cd ".tmp_archive/$first_char" || return 1
 
-    if  apt download "$1" -o Dir::Etc::SourceList="../../.tmp_apt/sources.list" \
-                                    -o Dir::State::Lists="../../.tmp_apt/lists" \
-                                    &> /dev/null ;then
-        print_color "Downloading $1 from Mirror was successful." $purple
-        cd ../../ || return 1
-        return 0
-    else
-
-        print_color "Error: Download from mirror failed for $1" $red
-        cd ../../ || return 1
+    check:mirror:default
+    if (( ! ret_mirror_default )); then
+        log:failure "pkg:mirror:" "Plase first set mirror:default!"
         return 1
     fi
 
+    [[ ! -f "${path_mirror_default}/Packages.db" ]] && mirror:update
+
+
+    for arg in "$@"; do
+        local arg_url="$(db:get:url ${arg})"
+        if pkg:url "${arg_url}" "false_metadeta"; then
+            meta_data:pkg:add "${arg}" "$(echo "${arg_url}" | rev | cut -d'/' -f1 | rev)" "$(db:found:depends ${arg})"
+        fi
+    done
 }
 
+# fetch package with full transitive deps.
+pkg:mirror:depends ()
+{
+    check:mirror:default
+    if (( ! ret_mirror_default )); then
+        log:failure "pkg:mirror:" "Plase first set mirror:default!"
+        return 1
+    fi
+
+    local deps=$(db:found:all:depends ${1})
+    pkg:mirror ${1} ${deps}
+
+}
+
+# manual dep add (local/url); mirror-only.
+pkg:add:depends:from:mirror ()
+{
+    pkg:mirror ${2} || return 1
+    meta_data:pkg:add:depends ${1} ${2} || return 1
+}
 
 # Receive a package via an internet address
 pkg:url ()
 {   
 
-    filename="${1##*/}"
-    check_archive_folder "$filename"
+    local filename="${1##*/}"
+    check:archive_folder "${filename}" || return 1
 
-    if curl -f --output-dir ".tmp_archive/$first_char" -O "$1"; then
-
-        print_color "Download successful: $1" $green
+    if curl ${CURL_FLAG} --output-dir ".tmp_archive/${first_char}" -O "${1}" &> /dev/null; then
+        log:success "pkg:url:" "Download successful: ${1}"
+        [[ -z ${2} ]] && meta_data:pkg:add "${filename}" "${filename}" " "
         return 0
     else
-        print_color "Error: Download failed for $1" $red
+        log:failure  "pkg:url:" "Download failed for ${1}"
         return 1
     fi
 
@@ -149,86 +510,180 @@ pkg:url ()
 # Receive a package via a local address
 pkg:debfile ()
 {   
-    if [[ ! -f $1 ]]; then 
-        print_color "Error: file $1 no found!" $red
+    readonly path_pkg=${1}
+    readonly filename="${path_pkg##*/}"
+
+    if [[ ! -f ${1} ]]; then 
+        log:failure "pkg:debfile:" "file ${1} no found!"
         return 1
     fi
 
-    check_archive_folder ${1##*/}
-    cp "$1" ".tmp_archive/$first_char" || return 1
+    check:archive_folder ${filename}
+    
+    if cp "${path_pkg}" ".tmp_archive/${first_char}"; then
+        log:success "pkg:debfile" "Adding ${filename} package successful."
+        meta_data:pkg:add "${filename}" "${filename}" " "
+        echo "${filename}"
+        return 0
+    else 
+        log:failure "pkg:debfile" "Adding ${filename} package failed."
+        return 1
+    fi
+
+    
 }
 
+# Download to the latest version via a pointer
+pkg:pointer_file_url ()
+{  
+    if curl -L ${CURL_FLAG} "${1}" > .last_version; then
+        log:success "pkg:pointer_file_url:" "Download successful: ${1}"
+    else
+        log:failure "pkg:pointer_file_url:" "Download failed for ${1}"
+        return 1
+    fi
+    
+    local url_last_version=$(cat .last_version)
 
+    if [[ ${url_last_version} ]]; then
+        rm -f .last_version
+        pkg:url "${url_last_version}" || return 1
+        echo "${filename}"
+    else
+        log:failure "pkg:pointer_file_url:" "last_version invalid."
+        rm -f .last_version
+        return 1
+    fi
+}
 
 # Archiveing ---------------------------------------------------
 
-
 # Creating an archive
-create_archive ()
+archive:create ()
 {
+    if [[ ! -d .tmp_archive ]]; then
+        log:failure "archive:create:" "folder Packages not found! (.tmp_archive)"
+        return 1
+    fi  
+
+    root_directory="${1}-packages"
+    meta_data:set:rootdir ${root_directory}
+
     cd .tmp_archive || return 1
+
+    if ! mkdir -p ${root_directory}; then
+        log:failure "archive:create:" "not can create ${root_directory}!"
+        return 1
+    fi 
     
-    if zip -r package.zip . &> /dev/null;then
-        print_color "Compression completed successfully" $green
+    mv * ${root_directory} &> /dev/null
+    
+    if zip -r "${1}.zip" ${root_directory} &> /dev/null; then
+        log:success "archive:create:" "Compression completed successfully"
     else 
-        print_color "Compression failed" $red
+        log:failure "archive:create:" "Compression failed"
         return 1
     fi
     
-    mv package.zip .. && cd .. || return 1
+    mv "${1}.zip" .. && cd .. || return 1
     clean
+}
+
+
+# Adding or updating a package in the archive
+archive:pkg:add () 
+{
+
+    local root_directory="$(meta_data:found:rootdir)"
+    
+    mkdir -p  ".tmp_archive/${root_directory}"
+    cd ".tmp_archive/" || return 1 
+    
+    mv * ${root_directory} &> /dev/null
+    bash -c "zip "../${1}" "${root_directory}/?/*.deb""
+    cd ../ 
+    
+    meta_data:archive:update ${1}
+    
+    clean
+
+}
+
+# remove package from archive.
+archive:pkg:del ()
+{
+
+    local archive="${1}"
+    local pkg="${2}"
+    local pkg_full=""
+    
+    clean
+
+    for arg in ${pkg}; do
+
+        pkg_full="${arg##*/}"
+        pkg_full="$(meta_data:found:namefull "${pkg_full}")"
+
+        if zip -d "${archive}" "*/${pkg_full:0:1}/${pkg_full}"; then 
+            meta_data:pkg:del "$(echo "${pkg_full}" | rev | cut -d'/' -f1 | rev)"
+        else 
+            return 1
+        fi
+    done
+
+    meta_data:archive:update "${1}"
+
+    clean
+}
+
+# execute function with package argument.
+action:flag ()
+{
+    local command=${1}
+    local pkg=${2}
+
+    if ! "${command}" "${pkg}"; then
+        color:print "Failure in: ${command} ${pkg}" ${red}
+        return 1
+    fi
 }
 
 # Package flags analyzer in archive-crtl
-analysis_flages ()
+analysis:flages:add ()
 {
-
+    local command="${1}"
+    local pkg="${2}"
+    
     clean
 
-    case $1 in 
-        basefile:debfile)
-            if ! basefile:debfile "$2"; then 
-                print_color "Failure in: $1 $2" $red
-                return 1
-            fi
-        ;;
-        basefile:pointer_file_url)
-            if ! basefile:pointer_file_url "$2"; then
-                print_color "Failure in: $1 $2" $red
-                return 1
-            fi
-        ;;
+    case ${1} in 
         pkg:debfile)
-            if ! pkg:debfile "$2"; then
-                print_color "Failure in: $1 $2" $red
-                return 1
-            fi
+            action:flag "${command}" "${pkg}"
         ;;
+        
+        pkg:debfile)
+            action:flag "${command}" "${pkg}"
+        ;;
+        
+        pkg:pointer_file_url)
+            action:flag "${command}" "${pkg}"
+        ;;
+        
         pkg:url)
-            if ! pkg:url "$2"; then 
-                print_color "Failure in: $1 $2" $red
-                return 1
-            fi
+            action:flag "${command}" "${pkg}"
         ;;
+        
         pkg:mirror)
-            echo "oooo: $2"
-            if ! pkg:mirror "$2"; then
-                print_color "Failure in: $1 $2" $red
-                return 1
-            fi
+            action:flag "${command}" "${pkg}"
         ;; 
+        
+        pkg:mirror:depends)
+            action:flag "${command}" "${pkg}"
+        ;;
+        
         *)
-            print_color "Invalid command." $red 
+            color:print "Invalid command." ${red} 
             return 1
         ;;
     esac
-}
-
-# Adding or updating a package in the archive
-add_archive () 
-{
-    cd .tmp_archive || return 1
-    zip "../$1" */*.deb
-    cd .. || return 1
-    clean && return 0
 }
