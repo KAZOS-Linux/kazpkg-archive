@@ -13,16 +13,47 @@ Portable Debian Package Archive Manager
 
 ## What is kazpkg-archive?
 
-kazpkg-archive is a lightweight Bash-based tool designed to create, maintain, and update portable Debian package archives.
+**kazpkg-archive** is a lightweight Bash framework for building, managing, and distributing portable Debian package archives.
 
-Unlike traditional repository managers, kazpkg-archive focuses on:
+It simplifies package collection from Debian repositories, direct URLs, or local `.deb` files while providing dependency resolution, archive management, and metadata tracking.
 
-- Package collection
-- Portable archives
-- Easy updates
-- Simple workflows
-- No database
-- No complex repository setup
+Instead of creating a complete Debian repository, **kazpkg-archive** focuses on building self-contained package archives that can be easily updated, redistributed, and integrated into projects such as **kazbuild-rootfs**.
+
+---
+
+## Features
+
+✔ Debian mirror management
+
+✔ Fast package indexing with SQLite
+
+✔ Automatic dependency resolution
+
+✔ Download packages directly from Debian mirrors
+
+✔ Download packages from direct URLs
+
+✔ Import local `.deb` packages
+
+✔ Dynamic package retrieval using `pointer_file_url`
+
+✔ Portable ZIP archive generation
+
+✔ Archive metadata management
+
+✔ Add packages to existing archives
+
+✔ Remove packages from existing archives
+
+✔ Incremental archive updates
+
+✔ Pool-inspired package organization
+
+✔ Multi-architecture support (x86_64, i686, armv7, aarch64)
+
+✔ Lightweight Bash implementation
+
+✔ Designed for integration with **kazbuild-rootfs**
 
 ---
 
