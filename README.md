@@ -6,8 +6,8 @@
 Portable Debian Package Archive Manager
 
 <p align="center">
-  <a href="documents/README.en.md">🇺🇸 English Documentation</a> |
-  <a href="documents/README.fa.md">🇮🇷 مستندات فارسی</a>
+  <a href="https://wiki.kazos.ir/doku.php?id=en:mainpage">🇺🇸 English Documentation</a> |
+  <a href="https://wiki.kazos.ir/doku.php?id=fa:mainpage">🇮🇷 مستندات فارسی</a>
 </p>
 
 ---
