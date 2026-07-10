@@ -1,4 +1,4 @@
-#engine v0.4b
+#engine v0.4bfs
 #!/bin/bash
 [[ -n "${__ENGINE_LOADED__}" ]] && return 0
 readonly __ENGINE_LOADED__="YES"
